@@ -1,0 +1,141 @@
+name: Sync upstream changes
+
+
+on:
+  schedule:
+    # 每天北京时间 03:00
+    # UTC 19:00
+    - cron: "0 19 * * *"
+
+  workflow_dispatch:
+
+
+
+permissions:
+  contents: write
+
+
+
+env:
+  UPSTREAM_REPO: zhaoxuya520/reverse-skill
+  BRANCH: main
+
+
+
+jobs:
+
+  sync:
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+
+      # 拉取自己的 fork
+      - name: Checkout fork
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+
+
+      # 配置 git
+      - name: Configure git
+        run: |
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+
+      # 添加 upstream
+      - name: Add upstream remote
+        run: |
+
+          git remote add upstream \
+            https://github.com/${UPSTREAM_REPO}.git
+
+
+
+      # 检查 upstream 是否有新提交
+      - name: Check upstream updates
+        id: check
+        run: |
+
+          git fetch upstream ${BRANCH}
+
+
+          BEHIND=$(git rev-list \
+            HEAD..upstream/${BRANCH} \
+            --count)
+
+
+          echo "Commits behind upstream:"
+          echo $BEHIND
+
+
+
+          if [ "$BEHIND" -eq 0 ]; then
+
+            echo "No upstream updates."
+
+            echo "changed=false" >> $GITHUB_OUTPUT
+
+          else
+
+            echo "Upstream updates detected."
+
+            echo "changed=true" >> $GITHUB_OUTPUT
+
+          fi
+
+
+
+      # 没更新退出
+      - name: No updates
+        if: steps.check.outputs.changed == 'false'
+        run: |
+
+          echo "Fork already up to date."
+
+
+
+      # 创建同步前备份 Tag
+      - name: Create backup tag
+        if: steps.check.outputs.changed == 'true'
+        run: |
+
+          TAG="sync-backup-$(date +'%Y%m%d-%H%M%S')"
+
+
+          git tag "$TAG"
+
+
+          git push origin "$TAG"
+
+
+          echo "Created backup tag:"
+          echo "$TAG"
+
+
+
+      # 合并 upstream
+      - name: Merge upstream
+        if: steps.check.outputs.changed == 'true'
+        run: |
+
+          git merge upstream/${BRANCH} \
+            --no-edit
+
+
+
+      # 推送合并结果
+      - name: Push changes
+        if: steps.check.outputs.changed == 'true'
+        run: |
+
+          git push origin ${BRANCH}
