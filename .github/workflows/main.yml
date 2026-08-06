@@ -2,23 +2,135 @@ name: Sync fork with upstream
 
 on:
   schedule:
-    # 每天北京时间 09:00
-    - cron:  "0 19 * * *"
+    # 每天北京时间 03:00
+    # UTC 19:00
+    - cron: "0 19 * * *"
 
   workflow_dispatch:
+
 
 permissions:
   contents: write
 
+
+env:
+  FORK_REPO: zz-zed/reverse-skill
+  UPSTREAM_REPO: zhaoxuya520/reverse-skill
+  BRANCH: main
+
+
 jobs:
+
   sync:
+
     runs-on: ubuntu-latest
 
+
     steps:
-      - name: Sync fork
+
+      # 拉取当前 fork
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+
+
+      # 检查 upstream 是否更新
+      - name: Check upstream changes
+        id: check
         run: |
-          gh repo sync zz-zed/reverse-skill \
-            --source zhaoxuya520/reverse-skill \
+
+          git remote add upstream \
+            https://github.com/${UPSTREAM_REPO}.git
+
+          git fetch upstream ${BRANCH}
+
+          CURRENT=$(git rev-parse origin/${BRANCH})
+          UPSTREAM=$(git rev-parse upstream/${BRANCH})
+
+          echo "Current:"
+          echo $CURRENT
+
+          echo "Upstream:"
+          echo $UPSTREAM
+
+
+          if [ "$CURRENT" = "$UPSTREAM" ]; then
+
+            echo "No updates found."
+
+            echo "changed=false" >> $GITHUB_OUTPUT
+
+          else
+
+            echo "Updates detected."
+
+            echo "changed=true" >> $GITHUB_OUTPUT
+
+          fi
+
+
+
+      # 没更新直接退出
+      - name: Skip if no changes
+        if: steps.check.outputs.changed == 'false'
+        run: |
+
+          echo "Fork already up to date."
+
+
+
+      # 创建同步前备份 Tag
+      - name: Create backup tag
+        if: steps.check.outputs.changed == 'true'
+        run: |
+
+          TAG="sync-backup-$(date +'%Y%m%d-%H%M%S')"
+
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+          git tag $TAG
+
+          git push origin $TAG
+
+
+          echo "Created tag:"
+          echo $TAG
+
+
+
+      # 执行同步
+      - name: Sync upstream
+        if: steps.check.outputs.changed == 'true'
+        run: |
+
+          gh repo sync \
+            ${FORK_REPO} \
+            --source ${UPSTREAM_REPO} \
             --force
+
+
         env:
+
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+
+      # 输出结果
+      - name: Summary
+        run: |
+
+          echo "Sync completed."
+
+          echo "Repository:"
+          echo ${FORK_REPO}
+
+          echo "Source:"
+          echo ${UPSTREAM_REPO}
