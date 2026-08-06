@@ -1,22 +1,27 @@
 name: Sync fork with upstream
 
+
 on:
   schedule:
     # 每天北京时间 03:00
-    # UTC 19:00
+    # GitHub Actions 使用 UTC
     - cron: "0 19 * * *"
 
+  # 支持手动执行
   workflow_dispatch:
+
 
 
 permissions:
   contents: write
 
 
+
 env:
   FORK_REPO: zz-zed/reverse-skill
   UPSTREAM_REPO: zhaoxuya520/reverse-skill
   BRANCH: main
+
 
 
 jobs:
@@ -28,15 +33,16 @@ jobs:
 
     steps:
 
+
       # 拉取当前 fork
       - name: Checkout fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
 
 
-      # 检查 upstream 是否更新
+      # 检查 upstream 是否有更新
       - name: Check upstream changes
         id: check
         run: |
@@ -44,21 +50,27 @@ jobs:
           git remote add upstream \
             https://github.com/${UPSTREAM_REPO}.git
 
+
           git fetch upstream ${BRANCH}
 
+
           CURRENT=$(git rev-parse origin/${BRANCH})
+
           UPSTREAM=$(git rev-parse upstream/${BRANCH})
 
-          echo "Current:"
+
+          echo "Current fork:"
           echo $CURRENT
+
 
           echo "Upstream:"
           echo $UPSTREAM
 
 
+
           if [ "$CURRENT" = "$UPSTREAM" ]; then
 
-            echo "No updates found."
+            echo "No updates."
 
             echo "changed=false" >> $GITHUB_OUTPUT
 
@@ -72,16 +84,16 @@ jobs:
 
 
 
-      # 没更新直接退出
-      - name: Skip if no changes
+      # 没有更新直接结束
+      - name: No changes detected
         if: steps.check.outputs.changed == 'false'
         run: |
 
-          echo "Fork already up to date."
+          echo "Fork is already up to date."
 
 
 
-      # 创建同步前备份 Tag
+      # 同步前创建备份 Tag
       - name: Create backup tag
         if: steps.check.outputs.changed == 'true'
         run: |
@@ -92,21 +104,25 @@ jobs:
           git config user.name \
             "github-actions[bot]"
 
+
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
 
 
-          git tag $TAG
 
-          git push origin $TAG
+          git tag "$TAG"
 
 
-          echo "Created tag:"
-          echo $TAG
+          git push origin "$TAG"
 
 
 
-      # 执行同步
+          echo "Created backup tag:"
+          echo "$TAG"
+
+
+
+      # 同步 fork
       - name: Sync upstream
         if: steps.check.outputs.changed == 'true'
         run: |
@@ -127,10 +143,14 @@ jobs:
       - name: Summary
         run: |
 
-          echo "Sync completed."
+          echo "=============================="
 
-          echo "Repository:"
+          echo "Sync completed"
+
+          echo "Fork:"
           echo ${FORK_REPO}
 
-          echo "Source:"
+          echo "Upstream:"
           echo ${UPSTREAM_REPO}
+
+          echo "=============================="
