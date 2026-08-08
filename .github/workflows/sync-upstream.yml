@@ -2,7 +2,8 @@ name: Sync upstream changes
 
 on:
   schedule:
-    # 每天北京时间 03:00（UTC 19:00）
+    # 每天北京时间 / 新加坡时间 03:00
+    # UTC 19:00
     - cron: "0 19 * * *"
 
   workflow_dispatch:
@@ -19,11 +20,20 @@ concurrency:
   group: sync-upstream-main
   cancel-in-progress: false
 
+
 jobs:
   sync:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ============================================================
+      # 1. Checkout Fork
+      #
+      # 使用 SYNC_TOKEN，而不是默认 GITHUB_TOKEN。
+      # 这样才能同步上游 .github/workflows/** 文件。
+      # ============================================================
+
       - name: Checkout fork
         uses: actions/checkout@v5
         with:
@@ -31,10 +41,33 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.SYNC_TOKEN }}
 
+
+      # ============================================================
+      # 2. 配置 Git
+      # ============================================================
+
       - name: Configure git
         run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+      # ============================================================
+      # 3. 拉取 upstream
+      #
+      # upstream tags 不直接 fetch 到 refs/tags/*
+      # 而是放到 refs/upstream-tags/*
+      #
+      # 避免和我们自己的：
+      #
+      # archive-*
+      # upstream-sync-*
+      #
+      # 发生混淆。
+      # ============================================================
 
       - name: Fetch upstream
         run: |
@@ -44,12 +77,33 @@ jobs:
             "https://github.com/${UPSTREAM_REPO}.git"
 
           git fetch upstream \
-            "${BRANCH}" \
+            "+refs/heads/${BRANCH}:refs/remotes/upstream/${BRANCH}" \
+            --force
+
+          git fetch upstream \
+            "+refs/tags/*:refs/upstream-tags/*" \
             --force
 
           git fetch origin \
             "${BRANCH}" \
             --force
+
+          git fetch origin \
+            "+refs/tags/*:refs/tags/*" \
+            --force || true
+
+
+      # ============================================================
+      # 4. 检查 upstream 是否有“实质内容变化”
+      #
+      # 唯一排除：
+      #
+      # .github/workflows/sync-upstream.yml
+      #
+      # 除此之外 Fork main 必须与 upstream/main 一致。
+      #
+      # 使用最终文件树比较，所以不依赖 common ancestor。
+      # ============================================================
 
       - name: Check upstream changes
         id: check
@@ -61,15 +115,23 @@ jobs:
           UPSTREAM_HEAD=$(git rev-parse "upstream/${BRANCH}")
           UPSTREAM_SHORT=$(git rev-parse --short=7 "upstream/${BRANCH}")
 
-          echo "origin_head=${ORIGIN_HEAD}" >> "$GITHUB_OUTPUT"
-          echo "upstream_head=${UPSTREAM_HEAD}" >> "$GITHUB_OUTPUT"
-          echo "upstream_short=${UPSTREAM_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "origin_head=${ORIGIN_HEAD}" \
+            >> "$GITHUB_OUTPUT"
 
-          echo "Fork HEAD:"
+          echo "upstream_head=${UPSTREAM_HEAD}" \
+            >> "$GITHUB_OUTPUT"
+
+          echo "upstream_short=${UPSTREAM_SHORT}" \
+            >> "$GITHUB_OUTPUT"
+
+          echo "Current Fork HEAD:"
           echo "${ORIGIN_HEAD}"
 
-          echo "Upstream HEAD:"
+          echo ""
+          echo "Current upstream HEAD:"
           echo "${UPSTREAM_HEAD}"
+
+          echo ""
 
           if git diff --quiet \
             HEAD \
@@ -77,19 +139,65 @@ jobs:
             -- . \
             ":(exclude)${SYNC_WORKFLOW}"
           then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "No substantive upstream changes."
+
+            echo "changed=false" \
+              >> "$GITHUB_OUTPUT"
+
+            echo "No substantive upstream content changes."
+
           else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "Upstream changes detected."
+
+            echo "changed=true" \
+              >> "$GITHUB_OUTPUT"
+
+            echo "Substantive upstream content changes detected."
+
           fi
 
-      - name: No upstream updates
-        if: steps.check.outputs.changed == 'false'
+
+      # ============================================================
+      # 5. 同步前归档当前 Fork main
+      #
+      # 只有真的发生内容更新才创建。
+      #
+      # 示例：
+      #
+      # archive-20260808-221500-9a3798e
+      #
+      # 它指向同步前的旧 main HEAD。
+      #
+      # 这样即使 upstream 重写整个历史，
+      # 旧 Fork 历史仍然有永久引用，不会失联。
+      # ============================================================
+
+      - name: Archive previous fork history
+        if: steps.check.outputs.changed == 'true'
+        env:
+          TZ: Asia/Singapore
         run: |
-          echo "Fork already matches upstream."
-          echo "Excluded fork-only file:"
-          echo "${SYNC_WORKFLOW}"
+          set -euo pipefail
+
+          TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
+          OLD_SHORT=$(git rev-parse --short=7 HEAD)
+
+          ARCHIVE_TAG="archive-${TIMESTAMP}-${OLD_SHORT}"
+
+          echo "Creating archive tag:"
+          echo "${ARCHIVE_TAG}"
+
+          git tag \
+            -a "${ARCHIVE_TAG}" \
+            -m "Fork state before upstream synchronization"
+
+          git push origin \
+            "${ARCHIVE_TAG}"
+
+          echo "Archive created successfully."
+
+
+      # ============================================================
+      # 6. 保存 Fork 唯一专属同步脚本
+      # ============================================================
 
       - name: Save fork sync workflow
         if: steps.check.outputs.changed == 'true'
@@ -100,6 +208,22 @@ jobs:
             "${SYNC_WORKFLOW}" \
             /tmp/sync-upstream.yml
 
+
+      # ============================================================
+      # 7. main 完整对齐 upstream
+      #
+      # 不 merge
+      # 不 rebase
+      #
+      # 所以支持：
+      #
+      # force push
+      # history rewrite
+      # squash
+      # orphan history
+      # no common ancestor
+      # ============================================================
+
       - name: Align fork with upstream
         if: steps.check.outputs.changed == 'true'
         run: |
@@ -108,7 +232,13 @@ jobs:
           git reset --hard \
             "upstream/${BRANCH}"
 
+          # 清除 upstream 中已经不存在的未跟踪文件
           git clean -fdx
+
+
+      # ============================================================
+      # 8. 恢复 Fork 唯一额外文件
+      # ============================================================
 
       - name: Restore fork sync workflow
         if: steps.check.outputs.changed == 'true'
@@ -125,6 +255,17 @@ jobs:
           git add \
             "${SYNC_WORKFLOW}"
 
+
+      # ============================================================
+      # 9. 创建 Fork 专属提交
+      #
+      # 最终 main：
+      #
+      # upstream/main
+      #      ↓
+      # chore: keep fork sync workflow
+      # ============================================================
+
       - name: Create fork sync commit
         if: steps.check.outputs.changed == 'true'
         run: |
@@ -132,11 +273,26 @@ jobs:
 
           if git diff --cached --quiet
           then
+
             echo "No fork-specific commit required."
+
           else
+
             git commit \
               -m "chore: keep fork sync workflow"
+
           fi
+
+
+      # ============================================================
+      # 10. 推送新的 main
+      #
+      # force-with-lease：
+      #
+      # 可以跟随 upstream 重写历史，
+      # 但如果本次任务执行期间有人修改 origin/main，
+      # 推送会失败而不是覆盖对方。
+      # ============================================================
 
       - name: Push synchronized main
         if: steps.check.outputs.changed == 'true'
@@ -147,9 +303,24 @@ jobs:
             "HEAD:${BRANCH}" \
             --force-with-lease="refs/heads/${BRANCH}:${{ steps.check.outputs.origin_head }}"
 
-          echo "Fork synchronized successfully."
+          echo "Fork main synchronized successfully."
 
-      - name: Create sync tag
+
+      # ============================================================
+      # 11. 创建同步完成快照 Tag
+      #
+      # 示例：
+      #
+      # upstream-sync-20260808-221510-a3e7eb1
+      #
+      # archive-*：
+      #   同步前状态
+      #
+      # upstream-sync-*：
+      #   同步完成后的状态
+      # ============================================================
+
+      - name: Create sync snapshot tag
         if: steps.check.outputs.changed == 'true'
         env:
           TZ: Asia/Singapore
@@ -160,6 +331,9 @@ jobs:
 
           TAG="upstream-sync-${TIMESTAMP}-${{ steps.check.outputs.upstream_short }}"
 
+          echo "Creating synchronization snapshot:"
+          echo "${TAG}"
+
           git tag \
             -a "${TAG}" \
             -m "Synced from ${UPSTREAM_REPO}@${{ steps.check.outputs.upstream_head }}"
@@ -167,24 +341,202 @@ jobs:
           git push origin \
             "${TAG}"
 
-          echo "Created tag:"
-          echo "${TAG}"
+          echo "Sync snapshot created successfully."
+
+
+      # ============================================================
+      # 12. 镜像 upstream 官方 Git Tags
+      #
+      # upstream tags 保存在：
+      #
+      # refs/upstream-tags/*
+      #
+      # 然后逐个同步成 Fork refs/tags/*
+      #
+      # 不会碰：
+      #
+      # archive-*
+      # upstream-sync-*
+      #
+      # 如果 upstream 修改同名 Tag，则 Fork 也随之更新。
+      # ============================================================
+
+      - name: Sync upstream tags
+        run: |
+          set -euo pipefail
+
+          echo "Synchronizing upstream Git tags..."
+
+          while IFS= read -r ref
+          do
+            TAG="${ref#refs/upstream-tags/}"
+
+            echo "Syncing upstream tag:"
+            echo "${TAG}"
+
+            git push origin \
+              "${ref}:refs/tags/${TAG}" \
+              --force
+
+          done < <(
+            git for-each-ref \
+              --format='%(refname)' \
+              refs/upstream-tags/
+          )
+
+          echo "Upstream Git tags synchronized."
+
+
+      # ============================================================
+      # 13. 镜像 upstream GitHub Releases
+      #
+      # Git Tag 和 GitHub Release 是两回事。
+      #
+      # git push tag 不会自动生成 Release，
+      # 所以必须单独调用 GitHub API。
+      #
+      # 行为：
+      #
+      # upstream Release 不存在于 Fork：
+      #   → 创建
+      #
+      # 已存在：
+      #   → 更新标题、正文、Draft、Prerelease
+      #
+      # Release Assets 当前不复制。
+      # ============================================================
+
+      - name: Sync upstream releases
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          FORK_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          echo "Fetching upstream releases..."
+
+          gh api \
+            --paginate \
+            "repos/${UPSTREAM_REPO}/releases?per_page=100" \
+            > /tmp/upstream-releases.json
+
+          RELEASE_COUNT=$(
+            jq -s 'add | length' \
+              /tmp/upstream-releases.json
+          )
+
+          echo "Upstream releases found: ${RELEASE_COUNT}"
+
+          jq -s -c 'add[]' \
+            /tmp/upstream-releases.json |
+          while IFS= read -r RELEASE
+          do
+
+            TAG=$(echo "${RELEASE}" | jq -r '.tag_name')
+            NAME=$(echo "${RELEASE}" | jq -r '.name // ""')
+            BODY=$(echo "${RELEASE}" | jq -r '.body // ""')
+            DRAFT=$(echo "${RELEASE}" | jq -r '.draft')
+            PRERELEASE=$(echo "${RELEASE}" | jq -r '.prerelease')
+
+            echo ""
+            echo "--------------------------------------"
+            echo "Release:"
+            echo "${TAG}"
+            echo "--------------------------------------"
+
+            # upstream 官方 Tag 必须已经同步到 Fork
+            if ! git ls-remote \
+              --exit-code \
+              --tags origin \
+              "refs/tags/${TAG}" \
+              >/dev/null 2>&1
+            then
+              echo "Tag ${TAG} does not exist in Fork."
+              echo "Skipping release."
+              continue
+            fi
+
+            printf '%s' "${BODY}" \
+              > /tmp/release-body.md
+
+            # 查询 Fork 中是否已经存在同 Tag Release
+            if gh api \
+              "repos/${FORK_REPO}/releases/tags/${TAG}" \
+              >/tmp/fork-release.json \
+              2>/dev/null
+            then
+
+              RELEASE_ID=$(
+                jq -r '.id' \
+                  /tmp/fork-release.json
+              )
+
+              echo "Release already exists."
+              echo "Updating release ${RELEASE_ID}..."
+
+              gh api \
+                --method PATCH \
+                "repos/${FORK_REPO}/releases/${RELEASE_ID}" \
+                -f name="${NAME}" \
+                --raw-field body="$(cat /tmp/release-body.md)" \
+                -F draft="${DRAFT}" \
+                -F prerelease="${PRERELEASE}" \
+                >/dev/null
+
+              echo "Release updated."
+
+            else
+
+              echo "Release does not exist."
+              echo "Creating release..."
+
+              gh api \
+                --method POST \
+                "repos/${FORK_REPO}/releases" \
+                -f tag_name="${TAG}" \
+                -f name="${NAME}" \
+                --raw-field body="$(cat /tmp/release-body.md)" \
+                -F draft="${DRAFT}" \
+                -F prerelease="${PRERELEASE}" \
+                >/dev/null
+
+              echo "Release created."
+
+            fi
+
+          done
+
+          echo ""
+          echo "Upstream Releases synchronized."
+
+
+      # ============================================================
+      # 14. 输出最终摘要
+      # ============================================================
 
       - name: Sync summary
-        if: steps.check.outputs.changed == 'true'
         run: |
           echo "======================================"
-          echo "Upstream synchronization completed"
+          echo "Fork synchronization completed"
           echo "======================================"
           echo ""
           echo "Upstream:"
           echo "${UPSTREAM_REPO}"
           echo ""
-          echo "Upstream commit:"
-          echo "${{ steps.check.outputs.upstream_head }}"
+          echo "Upstream HEAD:"
+          git rev-parse "upstream/${BRANCH}"
           echo ""
-          echo "Fork commit:"
+          echo "Fork HEAD:"
           git rev-parse HEAD
           echo ""
-          echo "Fork state:"
-          echo "upstream/main + ${SYNC_WORKFLOW}"
+          echo "Fork policy:"
+          echo "  upstream/main"
+          echo "  + ${SYNC_WORKFLOW}"
+          echo ""
+          echo "History:"
+          echo "  archive-*       = state before sync"
+          echo "  upstream-sync-* = state after sync"
+          echo ""
+          echo "Metadata:"
+          echo "  upstream Git tags mirrored"
+          echo "  upstream GitHub Releases mirrored"
