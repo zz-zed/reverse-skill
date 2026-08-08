@@ -1,0 +1,190 @@
+name: Sync upstream changes
+
+on:
+  schedule:
+    # 每天北京时间 03:00（UTC 19:00）
+    - cron: "0 19 * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: zhaoxuya520/reverse-skill
+  BRANCH: main
+  SYNC_WORKFLOW: .github/workflows/sync-upstream.yml
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+
+          git remote add upstream \
+            "https://github.com/${UPSTREAM_REPO}.git"
+
+          git fetch upstream \
+            "${BRANCH}" \
+            --force
+
+          git fetch origin \
+            "${BRANCH}" \
+            --force
+
+      - name: Check upstream changes
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ORIGIN_HEAD=$(git rev-parse "origin/${BRANCH}")
+          UPSTREAM_HEAD=$(git rev-parse "upstream/${BRANCH}")
+          UPSTREAM_SHORT=$(git rev-parse --short=7 "upstream/${BRANCH}")
+
+          echo "origin_head=${ORIGIN_HEAD}" >> "$GITHUB_OUTPUT"
+          echo "upstream_head=${UPSTREAM_HEAD}" >> "$GITHUB_OUTPUT"
+          echo "upstream_short=${UPSTREAM_SHORT}" >> "$GITHUB_OUTPUT"
+
+          echo "Fork HEAD:"
+          echo "${ORIGIN_HEAD}"
+
+          echo "Upstream HEAD:"
+          echo "${UPSTREAM_HEAD}"
+
+          if git diff --quiet \
+            HEAD \
+            "upstream/${BRANCH}" \
+            -- . \
+            ":(exclude)${SYNC_WORKFLOW}"
+          then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No substantive upstream changes."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream changes detected."
+          fi
+
+      - name: No upstream updates
+        if: steps.check.outputs.changed == 'false'
+        run: |
+          echo "Fork already matches upstream."
+          echo "Excluded fork-only file:"
+          echo "${SYNC_WORKFLOW}"
+
+      - name: Save fork sync workflow
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+
+          cp \
+            "${SYNC_WORKFLOW}" \
+            /tmp/sync-upstream.yml
+
+      - name: Align fork with upstream
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+
+          git reset --hard \
+            "upstream/${BRANCH}"
+
+          git clean -fdx
+
+      - name: Restore fork sync workflow
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+
+          mkdir -p \
+            "$(dirname "${SYNC_WORKFLOW}")"
+
+          cp \
+            /tmp/sync-upstream.yml \
+            "${SYNC_WORKFLOW}"
+
+          git add \
+            "${SYNC_WORKFLOW}"
+
+      - name: Create fork sync commit
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+
+          if git diff --cached --quiet
+          then
+            echo "No fork-specific commit required."
+          else
+            git commit \
+              -m "chore: keep fork sync workflow"
+          fi
+
+      - name: Push synchronized main
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+
+          git push origin \
+            "HEAD:${BRANCH}" \
+            --force-with-lease="refs/heads/${BRANCH}:${{ steps.check.outputs.origin_head }}"
+
+          echo "Fork synchronized successfully."
+
+      - name: Create sync tag
+        if: steps.check.outputs.changed == 'true'
+        env:
+          TZ: Asia/Singapore
+        run: |
+          set -euo pipefail
+
+          TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
+
+          TAG="upstream-sync-${TIMESTAMP}-${{ steps.check.outputs.upstream_short }}"
+
+          git tag \
+            -a "${TAG}" \
+            -m "Synced from ${UPSTREAM_REPO}@${{ steps.check.outputs.upstream_head }}"
+
+          git push origin \
+            "${TAG}"
+
+          echo "Created tag:"
+          echo "${TAG}"
+
+      - name: Sync summary
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          echo "======================================"
+          echo "Upstream synchronization completed"
+          echo "======================================"
+          echo ""
+          echo "Upstream:"
+          echo "${UPSTREAM_REPO}"
+          echo ""
+          echo "Upstream commit:"
+          echo "${{ steps.check.outputs.upstream_head }}"
+          echo ""
+          echo "Fork commit:"
+          git rev-parse HEAD
+          echo ""
+          echo "Fork state:"
+          echo "upstream/main + ${SYNC_WORKFLOW}"
