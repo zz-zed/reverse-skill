@@ -14,7 +14,10 @@ permissions:
 env:
   UPSTREAM_REPO: zhaoxuya520/reverse-skill
   BRANCH: main
-  SYNC_WORKFLOW: .github/workflows/sync-upstream.yml
+  FORK_OWNED_FILES: |
+    .github/workflows/sync-upstream.yml
+    .github/dependabot.yml
+  FORK_OWNED_BACKUP_DIR: /tmp/fork-owned-files
 
 concurrency:
   group: sync-upstream-main
@@ -35,7 +38,7 @@ jobs:
       # ============================================================
 
       - name: Checkout fork
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ env.BRANCH }}
           fetch-depth: 0
@@ -96,9 +99,9 @@ jobs:
       # ============================================================
       # 4. 检查 upstream 是否有“实质内容变化”
       #
-      # 唯一排除：
+      # 排除 Fork 专属文件：
       #
-      # .github/workflows/sync-upstream.yml
+      # FORK_OWNED_FILES
       #
       # 除此之外 Fork main 必须与 upstream/main 一致。
       #
@@ -133,11 +136,20 @@ jobs:
 
           echo ""
 
+          fork_owned_excludes=()
+          while IFS= read -r fork_owned_file
+          do
+            if [[ -n "${fork_owned_file}" ]]
+            then
+              fork_owned_excludes+=(":(exclude)${fork_owned_file}")
+            fi
+          done <<< "${FORK_OWNED_FILES}"
+
           if git diff --quiet \
             HEAD \
             "upstream/${BRANCH}" \
             -- . \
-            ":(exclude)${SYNC_WORKFLOW}"
+            "${fork_owned_excludes[@]}"
           then
 
             echo "changed=false" \
@@ -196,17 +208,30 @@ jobs:
 
 
       # ============================================================
-      # 6. 保存 Fork 唯一专属同步脚本
+      # 6. 保存 Fork 专属文件
       # ============================================================
 
-      - name: Save fork sync workflow
+      - name: Save fork-owned files
         if: steps.check.outputs.changed == 'true'
         run: |
           set -euo pipefail
 
-          cp \
-            "${SYNC_WORKFLOW}" \
-            /tmp/sync-upstream.yml
+          while IFS= read -r fork_owned_file
+          do
+            if [[ -z "${fork_owned_file}" ]]
+            then
+              continue
+            fi
+
+            test -f "${fork_owned_file}"
+
+            mkdir -p \
+              "${FORK_OWNED_BACKUP_DIR}/$(dirname "${fork_owned_file}")"
+
+            cp \
+              "${fork_owned_file}" \
+              "${FORK_OWNED_BACKUP_DIR}/${fork_owned_file}"
+          done <<< "${FORK_OWNED_FILES}"
 
 
       # ============================================================
@@ -237,23 +262,34 @@ jobs:
 
 
       # ============================================================
-      # 8. 恢复 Fork 唯一额外文件
+      # 8. 恢复 Fork 专属文件
       # ============================================================
 
-      - name: Restore fork sync workflow
+      - name: Restore fork-owned files
         if: steps.check.outputs.changed == 'true'
         run: |
           set -euo pipefail
 
-          mkdir -p \
-            "$(dirname "${SYNC_WORKFLOW}")"
+          fork_owned_files=()
+          while IFS= read -r fork_owned_file
+          do
+            if [[ -z "${fork_owned_file}" ]]
+            then
+              continue
+            fi
 
-          cp \
-            /tmp/sync-upstream.yml \
-            "${SYNC_WORKFLOW}"
+            mkdir -p \
+              "$(dirname "${fork_owned_file}")"
+
+            cp \
+              "${FORK_OWNED_BACKUP_DIR}/${fork_owned_file}" \
+              "${fork_owned_file}"
+
+            fork_owned_files+=("${fork_owned_file}")
+          done <<< "${FORK_OWNED_FILES}"
 
           git add \
-            "${SYNC_WORKFLOW}"
+            "${fork_owned_files[@]}"
 
 
       # ============================================================
@@ -263,10 +299,10 @@ jobs:
       #
       # upstream/main
       #      ↓
-      # chore: keep fork sync workflow
+      # chore: keep fork-owned files
       # ============================================================
 
-      - name: Create fork sync commit
+      - name: Create fork-owned files commit
         if: steps.check.outputs.changed == 'true'
         run: |
           set -euo pipefail
@@ -279,7 +315,7 @@ jobs:
           else
 
             git commit \
-              -m "chore: keep fork sync workflow"
+              -m "chore: keep fork-owned files"
 
           fi
 
@@ -531,7 +567,13 @@ jobs:
           echo ""
           echo "Fork policy:"
           echo "  upstream/main"
-          echo "  + ${SYNC_WORKFLOW}"
+          while IFS= read -r fork_owned_file
+          do
+            if [[ -n "${fork_owned_file}" ]]
+            then
+              echo "  + ${fork_owned_file}"
+            fi
+          done <<< "${FORK_OWNED_FILES}"
           echo ""
           echo "History:"
           echo "  archive-*       = state before sync"
